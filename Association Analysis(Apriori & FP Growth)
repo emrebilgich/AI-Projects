@@ -1,0 +1,54 @@
+import pandas as pd
+df = pd.read_csv("/kaggle/input/market-basket-analysis/Assignment-1_Data.csv", 
+                 sep=";",           # ; ile ayrılmış
+                 encoding="utf-8-sig",  # BOM temizlemek için
+                 dtype={"BillNo": str})  # karışık type uyarısını engeller
+print(df.head())
+print(df.info())
+
+df = df.dropna(subset=["Itemname"])
+df["Price"] = df["Price"].str.replace("\t", ".")
+df["Price"] = df["Price"].str.replace(",", ".")
+df["Price"] = pd.to_numeric(df["Price"], errors="coerce")
+df = df[df["Quantity"] > 0]
+df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+df["Itemname"] = df["Itemname"].str.strip()
+basket = df.groupby(["BillNo", "Itemname"])["Quantity"].sum().unstack().fillna(0)
+basket = basket > 0
+basket.head()
+
+from mlxtend.frequent_patterns import apriori, association_rules
+frequent_itemsets_ap = apriori(basket, 
+                               min_support=0.01, 
+                               use_colnames=True)
+rules_ap = association_rules(frequent_itemsets_ap, 
+                             metric="lift", 
+                             min_threshold=1)
+print("APRİORİ SONUÇLARI")
+print(rules_ap.head())
+
+from mlxtend.frequent_patterns import fpgrowth
+frequent_itemsets_fp = fpgrowth(basket, 
+                                min_support=0.01, 
+                                use_colnames=True)
+rules_fp = association_rules(frequent_itemsets_fp, 
+                             metric="lift", 
+                             min_threshold=1)
+print("FP-GROWTH SONUÇLARI")
+print(rules_fp.head())
+
+print(f"Apriori kural sayısı: {len(rules_ap)}")
+print(f"FP-Growth kural sayısı: {len(rules_fp)}")
+
+print(rules_ap.sort_values("lift", ascending=False).head(10))
+print(rules_fp.sort_values("lift", ascending=False).head(10))
+
+import matplotlib.pyplot as plt
+rules_ap.sort_values("lift", ascending=False).head(20).plot(
+    x="support",
+    y="confidence",
+    kind="scatter",
+    alpha=0.7
+)
+plt.title("Apriori Support vs Confidence")
+plt.show()
