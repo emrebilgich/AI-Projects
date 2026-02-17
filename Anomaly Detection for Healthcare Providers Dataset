@@ -1,0 +1,111 @@
+import numpy as np
+import pandas as pd
+import os
+for dirname, _, filenames in os.walk('/kaggle/input'):
+ for filename in filenames:
+ print(os.path.join(dirname, filename))
+/kaggle/input/healthcare-providers-data/Healthcare Providers.csv
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.ensemble import IsolationForest
+from sklearn.neighbors import LocalOutlierFactor
+from sklearn.svm import OneClassSVM
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+# 2) VERİ YÜKLEME
+df = pd.read_csv("/kaggle/input/healthcare-providers-data/Healthcare
+Providers.csv")
+# Sayısal kolonlar
+num_df = df.select_dtypes(include=['int64', 'float64']).copy()
+num_df = num_df.fillna(num_df.mean())
+# Standartlaştırma
+scaler = StandardScaler()
+num_scaled = scaler.fit_transform(num_df)
+# 3) ISOLATION FOREST
+iso = IsolationForest(contamination=0.02, random_state=42)
+iso_pred = iso.fit_predict(num_scaled)
+df["iso_anomaly"] = (iso_pred == -1).astype(int)
+# 4) LOCAL OUTLIER FACTOR (LOF)
+lof = LocalOutlierFactor(contamination=0.02)
+lof_pred = lof.fit_predict(num_scaled)
+df["lof_anomaly"] = (lof_pred == -1).astype(int)
+# 5) ONE-CLASS SVM
+svm = OneClassSVM(kernel='rbf', nu=0.02)
+svm_pred = svm.fit_predict(num_scaled)
+df["svm_anomaly"] = (svm_pred == -1).astype(int)
+# 6) AUTOENCODER
+input_dim = num_scaled.shape[1]
+input_layer = keras.Input(shape=(input_dim,))
+encoded = layers.Dense(16, activation="relu")(input_layer)
+encoded = layers.Dense(8, activation="relu")(encoded)
+decoded = layers.Dense(16, activation="relu")(encoded)
+output_layer = layers.Dense(input_dim, activation="linear")(decoded)
+autoencoder = keras.Model(input_layer, output_layer)
+autoencoder.compile(optimizer="adam", loss="mse")
+# Autoencoder
+autoencoder.fit(num_scaled, num_scaled, epochs=25, batch_size=64,
+shuffle=True, verbose=0)
+# Rekonstrüksiyon hatası
+recon = autoencoder.predict(num_scaled)
+mse = np.mean(np.power(num_scaled - recon, 2), axis=1)
+threshold = np.quantile(mse, 0.98)
+df["auto_recon_error"] = mse
+df["auto_anomaly"] = (df["auto_recon_error"] > threshold).astype(int)
+# 7) ANOMALİ SAYISI TABLOSU
+result = pd.DataFrame({
+ "Algorithm": ["Isolation Forest", "LOF", "One-Class SVM", "Autoencoder"],
+ "Anomaly_Count": [
+ df["iso_anomaly"].sum(),
+ df["lof_anomaly"].sum(),
+ df["svm_anomaly"].sum(),
+ df["auto_anomaly"].sum()
+ ]
+})
+print("=== Anomali Sayısı Tablosu ===")
+print(result)
+# 8) BAR
+plt.figure(figsize=(10,5))
+plt.bar(result["Algorithm"], result["Anomaly_Count"], color='skyblue')
+plt.title("Anomali Sayısı Karşılaştırması")
+plt.xlabel("Algoritma")
+plt.ylabel("Anomali Sayısı")
+plt.show()
+# 9) PCA
+pca = PCA(n_components=2)
+pca_data = pca.fit_transform(num_scaled)
+# Görselleştirme
+def plot_pca(color_col, title):
+ plt.figure(figsize=(10,6))
+ plt.scatter(pca_data[:,0], pca_data[:,1], c=color_col, cmap="coolwarm",
+s=8)
+ plt.title(title)
+ plt.show()
+plot_pca(df["iso_anomaly"], "PCA - Isolation Forest")
+plot_pca(df["lof_anomaly"], "PCA - LOF")
+plot_pca(df["svm_anomaly"], "PCA - One-Class SVM")
+plot_pca(df["auto_anomaly"], "PCA - Autoencoder")
+# 10) MODELLER ARASI ÇAKIŞMA
+comparison = pd.DataFrame([{
+ "iso_vs_lof": (df["iso_anomaly"] & df["lof_anomaly"]).sum(),
+ "iso_vs_svm": (df["iso_anomaly"] & df["svm_anomaly"]).sum(),
+ "iso_vs_auto": (df["iso_anomaly"] & df["auto_anomaly"]).sum(),
+ "lof_vs_svm": (df["lof_anomaly"] & df["svm_anomaly"]).sum(),
+ "lof_vs_auto": (df["lof_anomaly"] & df["auto_anomaly"]).sum(),
+ "svm_vs_auto": (df["svm_anomaly"] & df["auto_anomaly"]).sum()
+}])
+print("\n=== Modeller Arası Anomali Çakışma Sayıları ===")
+print(comparison)
+# 11) TÜM MODELLERİN ORTAK ANOMALİLERİ
+df["all_agree"] = (
+ df["iso_anomaly"] &
+ df["lof_anomaly"] &
+ df["svm_anomaly"] &
+ df["auto_anomaly"]
+).astype(int)
+print("\nTüm modellerin ortak anomalileri:", df["all_agree"].sum())
