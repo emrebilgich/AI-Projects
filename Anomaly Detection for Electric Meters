@@ -1,0 +1,410 @@
+-------------------------------------------------------------------------Main.py-------------------------------------------------------------
+import os
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.ensemble import IsolationForest
+from sklearn.neighbors import LocalOutlierFactor
+from tensorflow.keras.models import load_model
+import joblib
+# ===================== AYARLAR =====================
+WINDOW_SIZE = 48
+N_TRAIN_METERS = 100
+N_TEST_METERS = 20
+AE_MODEL_PATH = "lstm_autoencoder_new.keras"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+IF_SAMPLE_SIZE = 300_000
+# ===================== VERİ YÜKLEME =====================
+csv_files = [f for f in os.listdir(DATA_DIR) if f.endswith(".csv")]
+df = pd.concat([pd.read_csv(os.path.join(DATA_DIR, f)) for f in csv_files],
+ignore_index=True)
+# ===================== FONKSİYONLAR =====================
+def prepare_meter_sequences(df, meter_id, window_size,
+scaler=None):
+ meter_df = df[df["LCLid"] == meter_id].copy()
+ meter_df["day"] = pd.to_datetime(meter_df["day"])
+ meter_df = meter_df.sort_values("day")
+ hh_cols = [c for c in meter_df.columns if c.startswith("hh_")]
+ meter_df[hh_cols] = meter_df[hh_cols].ffill().bfill()
+ ts = meter_df[hh_cols].values.flatten().reshape(-1, 1)
+ expanded_timestamps = []
+ for d in meter_df["day"]:
+ for minute in range(0, 1440, 30):
+ expanded_timestamps.append(d +
+pd.Timedelta(minutes=minute))
+ expanded_timestamps = np.array(expanded_timestamps)
+ if np.isnan(ts).any(): ts = np.nan_to_num(ts, nan=0.0)
+ if scaler is None:
+ scaler = MinMaxScaler()
+ ts_scaled = scaler.fit_transform(ts)
+ else:
+ ts_scaled = scaler.transform(ts)
+ X = [ts_scaled[i:i + window_size] for i in range(len(ts_scaled) -
+window_size)]
+ actual_timestamps = expanded_timestamps[window_size:]
+ return np.array(X), ts_scaled, meter_df, actual_timestamps, scaler
+# ===================== HAZIRLIK =====================
+all_meters = df["LCLid"].unique().tolist()
+train_meters = np.random.choice(all_meters,
+size=min(N_TRAIN_METERS, len(all_meters)), replace=False).tolist()
+test_meters = np.random.choice(list(set(all_meters) -
+set(train_meters)),
+ size=min(N_TEST_METERS, len(all_meters) -
+len(train_meters)), replace=False).tolist()
+X_train_all = []
+global_scaler = joblib.load("global_scaler.pkl")
+print("Eğitim verileri hazırlanıyor...")
+for meter_id in train_meters:
+ X_meter, _, _, _, returned_scaler = prepare_meter_sequences(df,
+meter_id, WINDOW_SIZE, scaler=global_scaler)
+ if global_scaler is None: global_scaler = returned_scaler
+ if len(X_meter) > 0: X_train_all.append(X_meter)
+X_train = np.concatenate(X_train_all)
+X_flat = X_train.reshape(len(X_train), -1)
+# ===================== MODELLER =====================
+print("Modeller kuruluyor...")
+ae = load_model(AE_MODEL_PATH, compile=False)
+# 1. Isolation Forest:
+iforest = IsolationForest(n_estimators=200, contamination='auto',
+random_state=42, n_jobs=-1)
+iforest.fit(X_flat[np.random.choice(len(X_flat), min(IF_SAMPLE_SIZE,
+len(X_flat)), replace=False)])
+# 2. LOF:
+lof_model = LocalOutlierFactor(n_neighbors=40, contamination='auto',
+n_jobs=-1)
+# AE:
+print("Autoencoder için eşik belirleniyor...")
+train_recon = ae.predict(X_train[:10000], verbose=0)
+train_error = np.mean(np.abs(train_recon - X_train[:10000]), axis=(1, 2))
+AE_THRESHOLD = np.percentile(train_error, 98)
+# ===================== TEST DÖNGÜSÜ =====================
+all_ae_anoms, all_if_anoms, all_lof_anoms, all_timestamps, results =
+[], [], [], [], []
+for meter_id in test_meters:
+ print(f"ANALİZ EDİLİYOR: {meter_id}")
+ X_test, _, _, t_stamps, _ = prepare_meter_sequences(df, meter_id,
+WINDOW_SIZE, scaler=global_scaler)
+ if len(X_test) == 0: continue
+ X_test_flat = X_test.reshape(len(X_test), -1)
+ recon = ae.predict(X_test, verbose=0)
+ ae_anom = np.mean(np.abs(recon - X_test), axis=(1, 2)) >
+AE_THRESHOLD
+ if_anom = iforest.predict(X_test_flat) == -1
+ lof_anom = lof_model.fit_predict(X_test_flat) == -1
+ all_ae_anoms.append(ae_anom)
+ all_if_anoms.append(if_anom)
+ all_lof_anoms.append(lof_anom)
+ all_timestamps.append(t_stamps)
+ results.append({
+ "Meter": meter_id,
+ "AE": ae_anom.sum(),
+ "IF": if_anom.sum(),
+ "LOF": lof_anom.sum(),
+ "Consensus": (ae_anom.astype(int) + if_anom.astype(int) +
+lof_anom.astype(int) >= 2).sum()
+ })
+# ===================== KAYIT =====================
+np.save("ae_anom.npy", np.concatenate(all_ae_anoms))
+np.save("if_anom.npy", np.concatenate(all_if_anoms))
+np.save("lof_anom.npy", np.concatenate(all_lof_anoms))
+np.save("timestamps.npy", np.concatenate(all_timestamps))
+pd.DataFrame(results).to_csv("multi_meter_results.csv", index=False)
+print("\n=== İŞLEM TAMAMLANDI ===")
+model_comparison.py
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import jaccard_score
+# VERİ YÜKLEME
+ae_anom = np.load("ae_anom.npy")
+if_anom = np.load("if_anom.npy")
+lof_anom = np.load("lof_anom.npy")
+# KONSENSÜS ANALİZİ
+votes = ae_anom.astype(int) + if_anom.astype(int) +
+lof_anom.astype(int)
+consensus_2 = votes >= 2
+consensus_3 = votes == 3
+# MODEL BENZERLİK (JACCARD INDEX)
+js_ae_if = jaccard_score(ae_anom, if_anom)
+js_ae_lof = jaccard_score(ae_anom, lof_anom)
+js_if_lof = jaccard_score(if_anom, lof_anom)
+print("\nModel Similarity (Jaccard Index)")
+print("--------------------------------")
+print(f"Autoencoder vs Isolation Forest : {js_ae_if:.4f}")
+print(f"Autoencoder vs LOF : {js_ae_lof:.4f}")
+print(f"Isolation Forest vs LOF : {js_if_lof:.4f}")
+# GENEL ÖZET TABLOSU
+summary = pd.DataFrame({
+ "Model / Yöntem": ["Autoencoder", "Isolation Forest", "LOF",
+"Consensus ≥2", "Consensus (Tam Uyumluluk)"],
+ "Tespit Edilen Anomali Sayısı": [
+ ae_anom.sum(),
+ if_anom.sum(),
+ lof_anom.sum(),
+ consensus_2.sum(),
+ consensus_3.sum()
+ ]
+})
+print("\nOverlap Analysis Summary")
+print(summary)
+# KORELASYON ISI HARİTASI
+plt.figure(figsize=(8, 6))
+correlation_data = pd.DataFrame({'AE': ae_anom, 'IF': if_anom, 'LOF':
+lof_anom})
+sns.heatmap(correlation_data.corr(), annot=True, cmap='coolwarm',
+center=0)
+plt.title("Modeller Arası Karar Korelasyonu")
+plt.tight_layout()
+plt.savefig("model_correlation.png")
+plt.show()
+# ANOMALİ DAĞILIMI
+plt.figure(figsize=(15, 6))
+view_limit = 10000
+indices = np.arange(view_limit)
+plt.plot(indices, votes[:view_limit], color='black', alpha=0.2, label="Oy
+Sayısı (0-3)")
+plt.scatter(np.where(ae_anom[:view_limit])[0],
+[1.1]*ae_anom[:view_limit].sum(), marker='|', color='blue', label='AE')
+plt.scatter(np.where(if_anom[:view_limit])[0],
+[1.2]*if_anom[:view_limit].sum(), marker='|', color='green', label='IF')
+plt.scatter(np.where(lof_anom[:view_limit])[0],
+[1.3]*lof_anom[:view_limit].sum(), marker='|', color='red', label='LOF')
+plt.title(f"Modellerin Anomali Çakışmaları (İlk {view_limit} Veri
+Noktası)")
+plt.xlabel("Zaman İndeksi")
+plt.ylabel("Modeller")
+plt.legend(loc='upper right')
+plt.grid(axis='x', alpha=0.3)
+plt.tight_layout()
+plt.show()
+create_report.py
+import numpy as np
+import pandas as pd
+# 1. VERİLERİ YÜKLE
+try:
+ ae_anom = np.load("ae_anom.npy")
+ if_anom = np.load("if_anom.npy")
+ lof_anom = np.load("lof_anom.npy")
+ timestamps = np.load("timestamps.npy", allow_pickle=True)
+ print("Dosyalar başarıyla yüklendi.")
+except FileNotFoundError as e:
+ print(f"Hata: Gerekli .npy dosyalarından biri bulunamadı! {e}")
+ exit()
+# 2. TAM UYUMLULUK NOKTALARINI BUL
+consensus_3 = (ae_anom.astype(int) + if_anom.astype(int) +
+lof_anom.astype(int)) == 3
+# 3. BOYUT KONTROLÜ VE RAPORLAMA
+if len(timestamps) != len(consensus_3):
+ print(f"Uyarı: Boyut uyuşmazlığı tespit edildi! Zaman:
+{len(timestamps)}, Anomali: {len(consensus_3)}")
+ min_len = min(len(timestamps), len(consensus_3))
+ timestamps = timestamps[:min_len]
+ consensus_3 = consensus_3[:min_len]
+kritik_indeksler = np.where(consensus_3)[0]
+# 4. DATAFRAME OLUŞTURMA VE KAYDETME
+if len(kritik_indeksler) > 0:
+ report_df = pd.DataFrame({
+ 'Zaman_Indeksi': kritik_indeksler,
+ 'Tarih_Saat': timestamps[consensus_3]
+ })
+ report_df.to_csv("kritik_anomaliler_raporu.csv", index=False)
+ print(f"\nToplam Kritik Anomali Sayısı (3/3): {len(report_df)}")
+ print("--- İLK 10 KRİTİK ANOMALİ ---")
+ print(report_df.head(10))
+ print("\nSonuçlar 'kritik_anomaliler_raporu.csv' dosyasına
+kaydedildi.")
+else:
+ print("\nKritik anomali (3/3) bulunamadı. Modellerin hepsi aynı anda
+anomali dememiş.")
+analyze_risky_meters.py
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+# 1. VERİLERİ YÜKLE
+results_df = pd.read_csv("multi_meter_results.csv")
+kritik_rapor = pd.read_csv("kritik_anomaliler_raporu.csv")
+# 2. EN RİSKLİ SAYAÇLARIN TESPİTİ
+top_risky = results_df.sort_values(by="Consensus",
+ascending=False).head(10)
+print("\n=== EN YÜKSEK RİSKLİ 10 SAYAÇ (Konsensüs Skoru) ===")
+print(top_risky[["Meter", "Consensus", "AE", "IF", "LOF"]])
+# RİSK SKORU DAĞILIMI
+plt.figure(figsize=(12, 6))
+sns.barplot(data=top_risky, x="Meter", y="Consensus", hue="Meter",
+palette="Reds_r", legend=False)
+plt.title("En Çok Kritik Anomali Veren İlk 10 Sayaç", fontsize=14)
+plt.xlabel("Sayaç ID (LCLid)")
+plt.ylabel("Kritik Anomali Sayısı")
+plt.xticks(rotation=45)
+plt.grid(axis='y', linestyle='--', alpha=0.7)
+plt.tight_layout()
+plt.savefig("risky_meters_chart.png")
+plt.show()
+# PASTA GRAFİĞİ
+total_ae = results_df["AE"].sum()
+total_if = results_df["IF"].sum()
+total_lof = results_df["LOF"].sum()
+plt.figure(figsize=(8, 8))
+plt.pie([total_ae, total_if, total_lof],
+ labels=['Autoencoder', 'Isolation Forest', 'LOF'],
+ autopct='%1.1f%%',
+ colors=['skyblue', 'lightgreen', 'salmon'],
+ startangle=140)
+plt.title("Modellerin Toplam Anomali Tespit Payları")
+plt.tight_layout()
+plt.savefig("model_pie_chart.png")
+plt.show()
+visualize_risk_detail.py
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+# 1. VERİLERİ YÜKLE
+RISKY_METER = "MAC004974"
+kritik_rapor = pd.read_csv("kritik_anomaliler_raporu.csv")
+kritik_rapor['Tarih_Saat'] = pd.to_datetime(kritik_rapor['Tarih_Saat'])
+# 2. ANALİZ VE GÖRSELLEŞTİRME
+plt.figure(figsize=(15, 7))
+plt.hist(kritik_rapor['Tarih_Saat'], bins=100, color='crimson', alpha=0.7,
+label='Kritik Anomali Yoğunluğu')
+plt.title(f"Sistem Geneli Kritik Anomali Zaman Dağılımı", fontsize=15)
+plt.xlabel("Tarih")
+plt.ylabel("Anomali Frekansı")
+plt.grid(axis='y', alpha=0.3)
+plt.legend()
+plt.tight_layout()
+plt.show()
+print(f"Analiz Notu: {RISKY_METER} sayacı toplamda {1152} kez tam
+uyumluluk ile anomali vermiş.")
+visualize_anomalies.py
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+# 1. VERİ YÜKLEME
+ae_anom = np.load("ae_anom.npy")
+if_anom = np.load("if_anom.npy")
+lof_anom = np.load("lof_anom.npy")
+consensus_3 = (ae_anom.astype(int) + if_anom.astype(int) +
+lof_anom.astype(int)) == 3
+# 2. GÖRSELLEŞTİRME AYARLARI
+start_idx = 12000
+end_idx = 16000
+actual_end = min(end_idx, len(ae_anom))
+indices = np.arange(start_idx, actual_end)
+plt.figure(figsize=(18, 8))
+# 3. ANOMALİ KATMANLARI
+# AE (Mavi)
+plt.scatter(indices, [1.05] * len(indices),
+ c=ae_anom[start_idx:actual_end], cmap='coolwarm', marker='.',
+s=1, alpha=0) # Zemin
+ae_indices = indices[ae_anom[start_idx:actual_end]]
+plt.scatter(ae_indices, [1.05] * len(ae_indices), color='blue', s=10,
+label='AE Yakaladığı')
+# IF (Yeşil)
+if_indices = indices[if_anom[start_idx:actual_end]]
+plt.scatter(if_indices, [1.10] * len(if_indices), color='green', s=10,
+label='IF Yakaladığı')
+# LOF (Turuncu)
+lof_indices = indices[lof_anom[start_idx:actual_end]]
+plt.scatter(lof_indices, [1.15] * len(lof_indices), color='orange', s=10,
+label='LOF Yakaladığı')
+# 4. TAM UYUMLULUK (Kırmızı Çizgi ve Yıldız)
+gold_mask = consensus_3[start_idx:actual_end]
+gold_indices = indices[gold_mask]
+if len(gold_indices) > 0:
+ for idx in gold_indices:
+ plt.axvline(x=idx, color='red', alpha=0.1, linestyle='-', linewidth=0.5)
+ plt.scatter(gold_indices, [1.25] * len(gold_indices),
+ marker='*', color='red', s=50, label='TAM UYUMLULUK (Kritik)')
+# 5. GRAFİK
+plt.title(f"Anomali Detay Analizi (İndeks: {start_idx} - {actual_end})",
+fontsize=15)
+plt.xlabel("Zaman İndeksi")
+plt.ylabel("Anomali Modelleri")
+plt.yticks([1.05, 1.10, 1.15, 1.25], ['AE', 'IF', 'LOF', 'KRİTİK'])
+plt.legend(loc='upper right')
+plt.grid(axis='x', alpha=0.2)
+plt.tight_layout()
+print(f"Grafik oluşturuldu. Bu kesitteki kritik anomali sayısı:
+{sum(gold_mask)}")
+plt.show()
+train_lstm.py (LSTM Eğitim Kodu)
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import joblib
+import tensorflow as tf
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, RepeatVector,
+TimeDistributed
+from tensorflow.keras.optimizers import Adam
+WINDOW_SIZE = 48
+N_TOTAL_SAMPLED = 100
+DATA_DIR = "/kaggle/input/smart-meters-inlondon/hhblock_dataset/hhblock_dataset/"
+MODEL_SAVE_PATH = "lstm_autoencoder_new.keras"
+SCALER_SAVE_PATH = "global_scaler.pkl"
+gpus = tf.config.list_physical_devices('GPU')
+if gpus:
+ print(f"GPU Aktif: {len(gpus)} adet GPU bulundu.")
+ for gpu in gpus:
+ tf.config.experimental.set_memory_growth(gpu, True)
+else:
+ print("GPU bulunamadı!")
+csv_files = sorted([os.path.join(DATA_DIR, f) for f in os.listdir(DATA_DIR)
+if f.endswith(".csv")])[:15]
+df_list = []
+for f in csv_files:
+ df_list.append(pd.read_csv(f))
+df = pd.concat(df_list, ignore_index=True)
+all_meters = df["LCLid"].unique().tolist()
+sampled_meters = np.random.choice(all_meters,
+size=min(N_TOTAL_SAMPLED, len(all_meters)), replace=False).tolist()
+np.random.shuffle(sampled_meters)
+train_end = int(len(sampled_meters) * 0.70)
+val_end = int(len(sampled_meters) * 0.85)
+train_meters = sampled_meters[:train_end]
+val_meters = sampled_meters[train_end:val_end]
+test_meters = sampled_meters[val_end:]
+def prepare_sequences(meter_list, input_df, scaler=None):
+ X_list = []
+ for m_id in meter_list:
+ meter_df = input_df[input_df["LCLid"] == m_id].copy()
+ meter_df["day"] = pd.to_datetime(meter_df["day"])
+ meter_df = meter_df.sort_values("day")
+ hh_cols = [c for c in meter_df.columns if c.startswith("hh_")]
+ meter_df[hh_cols] = meter_df[hh_cols].ffill().bfill()
+ ts = meter_df[hh_cols].values.flatten().reshape(-1, 1)
+ if scaler is None:
+ scaler = MinMaxScaler()
+ ts_scaled = scaler.fit_transform(ts)
+ else:
+ ts_scaled = scaler.transform(ts)
+ X = [ts_scaled[i:i + WINDOW_SIZE] for i in range(len(ts_scaled) -
+WINDOW_SIZE)]
+ if len(X) > 0:
+ X_list.append(np.array(X))
+ return np.concatenate(X_list) if X_list else np.array([]), scaler
+print("Veriler hazırlanıyor...")
+X_train, global_scaler = prepare_sequences(train_meters, df)
+X_val, _ = prepare_sequences(val_meters, df, scaler=global_scaler)
+joblib.dump(global_scaler, SCALER_SAVE_PATH)
+model = Sequential([
+ LSTM(64, input_shape=(WINDOW_SIZE, 1), return_sequences=False),
+ RepeatVector(WINDOW_SIZE),
+ LSTM(64, return_sequences=True),
+ TimeDistributed(Dense(1))
+])
+model.compile(optimizer=Adam(0.001), loss="mse")
+history = model.fit(
+ X_train, X_train,
+ epochs=15,
+ batch_size=512,
+ validation_data=(X_val, X_val),
+ shuffle=True
+)
+model.save(MODEL_SAVE_PATH)
+print(f"Bitti! {MODEL_SAVE_PATH} ve {SCALER_SAVE_PATH}")
