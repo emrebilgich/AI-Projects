@@ -1,0 +1,167 @@
+import numpy as np
+import pandas as pd
+import os
+for dirname, _, filenames in os.walk('/kaggle/input'):
+ for filename in filenames:
+ print(os.path.join(dirname, filename))
+import matplotlib as plt
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.decomposition import PCA
+from sklearn.cluster import DBSCAN
+from sklearn.preprocessing import StandardScaler
+import numpy as np
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import datetime as dt
+import sklearn
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
+from scipy.cluster.hierarchy import linkage
+from scipy.cluster.hierarchy import dendrogram
+from scipy.cluster.hierarchy import cut_tree
+df = pd.read_csv('../input/online-retail-customer-clustering/OnlineRetail.csv', sep=",",
+encoding="ISO-8859-1", header=0)
+df.info()
+df.head()
+df.describe()
+df_null = round(100*(df.isnull().sum())/len(df), 2)
+df_null
+df = df.dropna()
+df.shape
+df['CustomerID'] = df['CustomerID'].astype(str)
+df['Amount'] = df['Quantity']*df['UnitPrice']
+rfm_m = df.groupby('CustomerID')['Amount'].sum()
+rfm_m = rfm_m.reset_index()
+rfm_m.head()
+rfm_f = df.groupby('CustomerID')['InvoiceNo'].count()
+rfm_f = rfm_f.reset_index()
+rfm_f.columns = ['CustomerID', 'Frequency']
+rfm_f.head()
+rfm = pd.merge(rfm_m, rfm_f, on='CustomerID', how='inner')
+rfm.head()
+df['InvoiceDate'] = pd.to_datetime(df['InvoiceDate'],format='%d-%m-%Y %H:%M')
+max_date = max(df['InvoiceDate'])
+max_date
+df['Recency'] = max_date - df['InvoiceDate']
+df.head()
+rfm_p = df.groupby('CustomerID')['Recency'].min()
+rfm_p = rfm_p.reset_index()
+rfm_p.head()
+rfm_p['Recency'] = rfm_p['Recency'].dt.days
+rfm_p.head()
+rfm = pd.merge(rfm, rfm_p, on='CustomerID', how='inner')
+rfm.columns = ['CustomerID', 'Amount', 'Frequency', 'Recency']
+rfm.head()
+attributes = ['Amount','Frequency','Recency']
+plt.rcParams['figure.figsize'] = [10,8]
+sns.boxplot(data = rfm[attributes], orient="v", palette="Set2" ,whis=1.5,saturation=1,
+width=0.7)
+plt.title("Outliers Variable Distribution", fontsize = 14, fontweight = 'bold')
+plt.ylabel("Range", fontweight = 'bold')
+plt.xlabel("Attributes", fontweight = 'bold')
+plt.show()
+#Removing for Monetary
+Q1 = rfm.Amount.quantile(0.05)
+Q3 = rfm.Amount.quantile(0.95)
+IQR = Q3 - Q1
+rfm = rfm[(rfm.Amount >= Q1 - 1.5*IQR) & (rfm.Amount <= Q3 + 1.5*IQR)]
+# Removing for Recency
+Q1 = rfm.Recency.quantile(0.05)
+Q3 = rfm.Recency.quantile(0.95)
+IQR = Q3 - Q1
+rfm = rfm[(rfm.Recency >= Q1 - 1.5*IQR) & (rfm.Recency <= Q3 + 1.5*IQR)]
+# Removing for Frequency
+Q1 = rfm.Frequency.quantile(0.05)
+Q3 = rfm.Frequency.quantile(0.95)
+IQR = Q3 - Q1
+rfm = rfm[(rfm.Frequency >= Q1 - 1.5*IQR) & (rfm.Frequency <= Q3 + 1.5*IQR)]
+rfm_df = rfm[['Amount', 'Frequency', 'Recency']]
+scaler = StandardScaler()
+rfm_df_scaled = scaler.fit_transform(rfm_df)
+rfm_df_scaled.shape
+rfm_df_scaled = pd.DataFrame(rfm_df_scaled)
+rfm_df_scaled.columns = ['Amount', 'Frequency', 'Recency']
+rfm_df_scaled.head()
+kmeans = KMeans(n_clusters=4, n_init=10, max_iter=100)
+kmeans.fit(rfm_df_scaled)
+kmeans.labels_
+ssd = []
+range_n_clusters = [2, 3, 4, 5, 6, 7, 8]
+for num_clusters in range_n_clusters:
+ kmeans = KMeans(n_clusters=num_clusters, n_init=10, max_iter=100)
+ kmeans.fit(rfm_df_scaled)
+
+ ssd.append(kmeans.inertia_)
+
+plt.plot(ssd)
+plt.show()
+range_n_clusters = [2, 3, 4, 5, 6, 7, 8]
+for num_clusters in range_n_clusters:
+
+ kmeans = KMeans(n_clusters=num_clusters, n_init=10, max_iter=100)
+ kmeans.fit(rfm_df_scaled)
+
+ cluster_labels = kmeans.labels_
+
+ silhouette_avg = silhouette_score(rfm_df_scaled, cluster_labels)
+ print("For n_clusters={0}, the silhouette score is {1}".format(num_clusters,
+silhouette_avg))
+kmeans = KMeans(n_clusters=3, n_init=10, max_iter=50)
+kmeans.fit(rfm_df_scaled)
+kmeans.labels_
+rfm['Cluster_Id'] = kmeans.labels_
+rfm.head()
+sns.boxplot(x='Cluster_Id', y='Amount', data=rfm)
+sns.boxplot(x='Cluster_Id', y='Frequency', data=rfm)
+sns.boxplot(x='Cluster_Id', y='Recency', data=rfm)
+mergings = linkage(rfm_df_scaled, method="single", metric='euclidean')
+dendrogram(mergings)
+plt.show()
+mergings = linkage(rfm_df_scaled, method="complete", metric='euclidean')
+dendrogram(mergings)
+plt.show()
+mergings = linkage(rfm_df_scaled, method="average", metric='euclidean')
+dendrogram(mergings)
+plt.show()
+cluster_labels = cut_tree(mergings, n_clusters=3).reshape(-1, )
+cluster_labels
+rfm['Cluster_Labels'] = cluster_labels
+rfm.head()
+sns.boxplot(x='Cluster_Labels', y='Amount', data=rfm)
+sns.boxplot(x='Cluster_Labels', y='Frequency', data=rfm)
+sns.boxplot(x='Cluster_Labels', y='Recency', data=rfm)
+scaler = StandardScaler()
+rfm_scaled = scaler.fit_transform(rfm[['Recency','Frequency','Amount']])
+db = DBSCAN(eps=0.5, min_samples=5, metric='euclidean')
+db.fit(rfm_scaled)
+labels = db.labels_
+rfm['Cluster_DBSCAN'] = labels
+n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
+n_noise = list(labels).count(-1)
+print(f'Estimated number of clusters: {n_clusters}')
+print(f'Estimated number of noise points: {n_noise}')
+cluster_summary = rfm.groupby('Cluster_DBSCAN').agg({
+ 'Recency':'mean',
+ 'Frequency':'mean',
+ 'Amount':'mean',
+ 'Cluster_DBSCAN':'count'
+}).rename(columns={'Cluster_DBSCAN':'Count'}).reset_index()
+print(cluster_summary.sort_values(by='Count', ascending=False))
+pca = PCA(n_components=2)
+rfm_pca = pca.fit_transform(rfm_scaled)
+plt.figure(figsize=(8,6))
+sns.scatterplot(
+ x=rfm_pca[:,0], y=rfm_pca[:,1],
+ hue=rfm['Cluster_DBSCAN'],
+ palette='tab10',
+ s=50, alpha=0.7
+)
+plt.title("DBSCAN Kümeleme Sonuçları")
+plt.xlabel("PCA 1")
+plt.ylabel("PCA 2")
+plt.legend(title='Küme', bbox_to_anchor=(1,1))
+plt.show()
