@@ -1,0 +1,315 @@
+!pip install protobuf==3.20.*
+import tensorflow as tf
+import google.protobuf
+print("TF version:", tf.__version__)
+print("Protobuf version:", google.protobuf.__version__)
+import numpy as np
+import pandas as pd
+import os
+for dirname, _, filenames in os.walk('/kaggle/input'):
+ for filename in filenames:
+ print(os.path.join(dirname, filename))
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+import itertools
+from pathlib import Path
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.applications import ResNet50
+from tensorflow.keras.applications.resnet50 import preprocess_input as
+resnet_preprocess
+from sklearn.metrics import classification_report, confusion_matrix,
+roc_auc_score, roc_curve, auc
+print("TF version:", tf.__version__)
+DATA_DIR = "/kaggle/input/children-vs-adults-images"
+BATCH_SIZE = 32
+IMG_SIZE = (224, 224)
+SEED = 42
+NUM_CLASSES = 2
+train_dir = os.path.join(DATA_DIR, "train")
+test_dir = os.path.join(DATA_DIR, "test")
+train_datagen = ImageDataGenerator(
+ rescale=1./255,
+ rotation_range=15,
+ width_shift_range=0.1,
+ height_shift_range=0.1,
+ horizontal_flip=True,
+ validation_split=0.2
+)
+test_datagen = ImageDataGenerator(rescale=1./255)
+train_generator = train_datagen.flow_from_directory(
+ train_dir,
+ target_size=IMG_SIZE,
+ batch_size=BATCH_SIZE,
+ class_mode='binary',
+ subset='training',
+ seed=SEED
+)
+val_generator = train_datagen.flow_from_directory(
+ train_dir,
+ target_size=IMG_SIZE,
+ batch_size=BATCH_SIZE,
+ class_mode='binary',
+ subset='validation',
+ seed=SEED,
+ shuffle=False
+)
+test_generator = test_datagen.flow_from_directory(
+ test_dir,
+ target_size=IMG_SIZE,
+ batch_size=BATCH_SIZE,
+ class_mode='binary',
+ shuffle=False
+)
+print("Class indices:", train_generator.class_indices)
+def compile_and_fit(model, epochs, train_gen, val_gen, model_name):
+ model.compile(
+ optimizer=keras.optimizers.Adam(learning_rate=1e-4),
+ loss='binary_crossentropy',
+ metrics=['accuracy']
+ )
+ callbacks = [
+ keras.callbacks.EarlyStopping(monitor='val_loss', patience=6,
+restore_best_weights=True),
+ keras.callbacks.ModelCheckpoint(f"{model_name}.h5", save_best_only=True)
+ ]
+ history = model.fit(
+ train_gen,
+ validation_data=val_gen,
+ epochs=epochs,
+ callbacks=callbacks
+ )
+ return history
+def plot_history(histories, titles):
+ plt.figure(figsize=(14,5))
+ plt.subplot(1,2,1)
+ for h, t in zip(histories, titles):
+ plt.plot(h.history['accuracy'], label=f'{t} train acc')
+ plt.plot(h.history['val_accuracy'], '--', label=f'{t} val acc')
+ plt.title('Accuracy')
+
+ plt.legend()
+ plt.subplot(1,2,2)
+ for h, t in zip(histories, titles):
+ plt.plot(h.history['loss'], label=f'{t} train loss')
+ plt.plot(h.history['val_loss'], '--', label=f'{t} val loss')
+ plt.title('Loss')
+ plt.legend()
+ plt.show()
+from sklearn.metrics import classification_report, confusion_matrix
+import numpy as np
+def evaluate_and_report(model, generator, label_map):
+ y_true = generator.classes
+ y_prob = model.predict(generator)
+ if y_prob.shape[1] == 1:
+ y_pred = (y_prob > 0.5).astype(int).reshape(-1)
+ y_prob_out = np.hstack([1 - y_prob, y_prob])
+ target_names = list(label_map.values())
+ else:
+ y_pred = np.argmax(y_prob, axis=1)
+ y_prob_out = y_prob
+ target_names = list(label_map.values())
+ target_names = [str(c) for c in target_names]
+ print("Classification Report:")
+ print(classification_report(y_true, y_pred, target_names=target_names,
+zero_division=0))
+ cm = confusion_matrix(y_true, y_pred)
+ return y_true, y_pred, y_prob_out, cm
+def plot_confusion_matrix(cm, classes, normalize=False, title='Confusion matrix'):
+ plt.figure(figsize=(5,4))
+ if normalize:
+ cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+ plt.imshow(cm, interpolation='nearest')
+ plt.title(title)
+ plt.colorbar()
+ tick_marks = np.arange(len(classes))
+ plt.xticks(tick_marks, classes, rotation=45)
+ plt.yticks(tick_marks, classes)
+ fmt = '.2f' if normalize else 'd'
+ thresh = cm.max() / 2.
+ for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
+ plt.text(j, i, format(cm[i, j], fmt), horizontalalignment="center",
+ color="white" if cm[i, j] > thresh else "black")
+ plt.ylabel('True label')
+ plt.xlabel('Predicted label')
+ plt.tight_layout()
+ plt.show()
+def plot_roc(y_true, y_prob, title='ROC Curve'):
+ fpr, tpr, _ = roc_curve(y_true, y_prob)
+ roc_auc = auc(fpr, tpr)
+ plt.figure(figsize=(6,5))
+ plt.plot(fpr, tpr, label='ROC curve (area = %0.3f)' % roc_auc)
+ plt.plot([0, 1], [0, 1], 'k--')
+ plt.xlim([0.0, 1.0])
+ plt.ylim([0.0, 1.05])
+ plt.xlabel('False Positive Rate')
+ plt.ylabel('True Positive Rate')
+ plt.title(title)
+ plt.legend(loc="lower right")
+ plt.show()
+ return roc_auc
+input_shape = IMG_SIZE + (3,)
+def build_mlp(input_shape):
+ inputs = keras.Input(shape=input_shape)
+ x = layers.Flatten()(inputs)
+ x = layers.Dense(512, activation='relu')(x)
+ x = layers.Dropout(0.5)(x)
+ x = layers.Dense(128, activation='relu')(x)
+ x = layers.Dropout(0.3)(x)
+ outputs = layers.Dense(1, activation='sigmoid')(x)
+ model = keras.Model(inputs, outputs, name='mlp_model')
+ return model
+mlp = build_mlp(input_shape)
+mlp.summary()
+hist_mlp = compile_and_fit(mlp, epochs=30, train_gen=train_generator,
+val_gen=val_generator, model_name='mlp_model')
+def build_simple_cnn(input_shape):
+ inputs = keras.Input(shape=input_shape)
+ x = layers.Conv2D(32, (3,3), activation='relu', padding='same')(inputs)
+ x = layers.MaxPooling2D((2,2))(x)
+ x = layers.Conv2D(64, (3,3), activation='relu', padding='same')(x)
+ x = layers.MaxPooling2D((2,2))(x)
+ x = layers.Conv2D(128, (3,3), activation='relu', padding='same')(x)
+ x = layers.MaxPooling2D((2,2))(x)
+ x = layers.GlobalAveragePooling2D()(x)
+ x = layers.Dense(256, activation='relu')(x)
+ x = layers.Dropout(0.4)(x)
+ outputs = layers.Dense(1, activation='sigmoid')(x)
+ model = keras.Model(inputs, outputs, name='simple_cnn')
+ return model
+cnn = build_simple_cnn(input_shape)
+cnn.summary()
+hist_cnn = compile_and_fit(cnn, epochs=40, train_gen=train_generator,
+val_gen=val_generator, model_name='simple_cnn')
+from tensorflow import keras
+from keras import layers
+from tensorflow.keras.applications import ResNet50
+from tensorflow.keras.applications import resnet50
+def build_resnet_model(input_shape):
+ base_model = ResNet50(
+ weights="imagenet",
+ include_top=False,
+ input_shape=input_shape
+ )
+ base_model.trainable = False
+ inputs = keras.Input(shape=input_shape)
+ x = layers.Lambda(
+ lambda img: resnet50.preprocess_input(img * 255.0),
+ output_shape=input_shape
+ )(inputs)
+ x = base_model(x, training=False)
+ x = layers.GlobalAveragePooling2D()(x)
+ x = layers.Dense(512, activation='relu')(x)
+ x = layers.Dropout(0.5)(x)
+ outputs = layers.Dense(1, activation='sigmoid')(x)
+ model = keras.Model(inputs, outputs, name="resnet50_tl")
+ return model
+resnet_model = build_resnet_model(input_shape)
+resnet_model.summary()
+history_resnet_tl = compile_and_fit(
+ model=resnet_model,
+ epochs=15,
+ train_gen=train_generator,
+ val_gen=val_generator,
+ model_name="resnet50_tl"
+)
+resnet_model.load_weights("resnet50_tl.h5")
+base_model = resnet_model.layers[2]
+base_model.trainable = True
+fine_tune_at = 140
+for layer in base_model.layers[:fine_tune_at]:
+ layer.trainable = False
+resnet_model.compile(
+ optimizer=keras.optimizers.Adam(1e-5),
+ loss="binary_crossentropy",
+ metrics=["accuracy"]
+)
+history_resnet_ft = resnet_model.fit(
+ train_generator,
+ validation_data=val_generator,
+ epochs=10,
+ callbacks=[
+ keras.callbacks.EarlyStopping(monitor="val_loss", patience=5,
+restore_best_weights=True),
+ keras.callbacks.ModelCheckpoint("resnet50_tl_finetuned.h5",
+save_best_only=True)
+ ]
+)
+resnet_model.load_weights("resnet50_tl_finetuned.h5")
+plot_history(
+ [hist_mlp, hist_cnn, history_resnet_ft],
+ ['MLP', 'CNN', 'ResNet50']
+)
+label_map = {v: str(k) for k, v in train_generator.class_indices.items()}
+inv_label_map = {v: k for k, v in label_map.items()}
+print("Label map:", label_map)
+print("Inverse label map:", inv_label_map)
+mlp.load_weights("mlp_model.h5")
+y_true_mlp, y_pred_mlp, y_prob_mlp, cm_mlp = evaluate_and_report(
+ model=mlp,
+ generator=test_generator,
+ label_map=inv_label_map
+)
+plot_confusion_matrix(
+ cm_mlp,
+ classes=list(inv_label_map.values()),
+ normalize=False,
+ title='MLP Confusion Matrix'
+)
+auc_mlp = plot_roc(y_true_mlp, y_prob_mlp[:, 1], title='MLP ROC')
+cnn.load_weights("simple_cnn.h5")
+y_true_cnn, y_pred_cnn, y_prob_cnn, cm_cnn = evaluate_and_report(
+ model=cnn,
+ generator=test_generator,
+ label_map=inv_label_map
+)
+plot_confusion_matrix(
+ cm_cnn,
+ classes=list(inv_label_map.values()),
+ normalize=False,
+ title='CNN Confusion Matrix'
+)
+auc_cnn = plot_roc(y_true_cnn, y_prob_cnn[:, 1], title='CNN ROC')
+resnet_model.load_weights("resnet50_tl.h5")
+y_true_res, y_pred_res, y_prob_res, cm_res = evaluate_and_report(
+ model=resnet_model,
+ generator=test_generator,
+ label_map=inv_label_map
+)
+plot_confusion_matrix(
+ cm_res,
+ classes=list(inv_label_map.values()),
+ normalize=False,
+ title='ResNet50 Confusion Matrix'
+)
+auc_res = plot_roc(y_true_res, y_prob_res[:, 1], title='ResNet50 ROC')
+from prettytable import PrettyTable
+from sklearn.metrics import accuracy_score, precision_score, recall_score,
+f1_score, roc_auc_score
+t = PrettyTable(['Model', 'Accuracy', 'Precision', 'Recall', 'F1', 'ROC AUC'])
+def summary_metrics(y_true, y_pred, y_prob):
+ return (
+ accuracy_score(y_true, y_pred),
+ precision_score(y_true, y_pred),
+ recall_score(y_true, y_pred),
+ f1_score(y_true, y_pred),
+ roc_auc_score(y_true, y_prob)
+ )
+for name, (yt, yp, yp_prob) in [
+ ('MLP', (y_true_mlp, y_pred_mlp, y_prob_mlp)),
+ ('CNN', (y_true_cnn, y_pred_cnn, y_prob_cnn)),
+ ('ResNet50', (y_true_res, y_pred_res, y_prob_res)),
+]:
+ acc, prec, rec, f1s, rocauc = summary_metrics(yt, yp, yp_prob)
+ t.add_row([
+ name,
+ f"{acc:.3f}",
+ f"{prec:.3f}",
+ f"{rec:.3f}",
+ f"{f1s:.3f}",
+ f"{rocauc:.3f}"
+ ])
+print(t)
