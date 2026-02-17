@@ -1,0 +1,63 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score, mean_squared_error
+from sklearn.linear_model import LinearRegression, Lasso, Ridge
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.ensemble import RandomForestRegressor
+df = pd.read_csv('/content/financial_regression.csv')
+target = 'sp500 close
+if target not in df.columns:
+print(df.columns)
+X = df.drop(columns=[target, 'date'])
+y = df[target]
+X = X.fillna(X.mean())
+y = y.fillna(y.mean())
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_st
+models = {
+"Linear Regression": LinearRegression(),
+"Decision Tree": DecisionTreeRegressor(random_state=42),
+"Random Forest": RandomForestRegressor (random_state=42),
+"Lasso": Lasso(),
+"Ridge": Ridge()
+}
+results = {}
+for name, model in models.items():
+print(f"\n {name} Modeli...")
+model.fit(X_train, y_train)
+y_pred = model.predict(X_test)
+r2 = r2_score(y_test, y_pred)
+mse = mean_squared_error(y_test, y_pred)
+results [name] = [r2, mse]
+print(f"R2 Skoru: (r2:.4f}")
+print(f"MSE: (mse:.4f}")
+print("
+(
+plt.figure(figsize=(6,4))
+plt.scatter(y_test, y_pred, alpha=0.5)
+plt.xlabel("Gerçek Değer (y_test)")
+plt.ylabel("Tahmini Değer (y_pred)")
+plt.title(f"{name)- Gerçek vs Tahmin")
+nlt.show
+[17]
+16 ☑
+sn.
+result_df = pd.DataFrame (results, index=["R2 Skoru", "MSE"]).T
+print("\n Modellerin Karşılaştırılmas1:\n")
+print(result_df)
+plt.figure (figsize=(7,4))
+plt.bar(result_df.index, result_df["R2 Skoru"])
+plt.xticks (rotation=45)
+plt.ylabel("R2 Skoru")
+plt.title("Modellerin R2 Skor Karşılaştırması")
+plt.show()
+plt.figure (figsize=(7,4))
+plt.bar(result_df.index, result_df["MSE"])
+plt.xticks (rotation=45)
+plt.ylabel("Hata (MSE)")
+plt.title("Modellerin MSE Karşılaştırması")
+plt.show()
+Linear Regression Modeli...
+R2 Skoru: 1.0000
+MSE: 0.2820
